@@ -1,0 +1,16 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+.env
+
+# Streamlit local secrets
+.streamlit/secrets.toml
+
+# Data files (กรณีไม่ต้องการให้ไฟล์ข้อมูลดิบติดขึ้น repo สาธารณะ)
+*.xlsx
+*.csv
