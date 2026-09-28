@@ -1,0 +1,11 @@
+[server]
+# ขยายขนาดไฟล์อัปโหลดสูงสุด (หน่วยเป็น MB เช่น 500 MB)
+maxUploadSize = 500
+
+[theme]
+# ปรับโทนสีแดชบอร์ดให้เป็นทางการและอ่านง่าย
+primaryColor = "#007BFF"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F8F9FA"
+textColor = "#212529"
+font = "sans serif"
