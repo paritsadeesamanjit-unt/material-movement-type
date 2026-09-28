@@ -27,7 +27,7 @@ def process_mb51_file(uploaded_file):
     excel_obj = pd.ExcelFile(uploaded_file)
     sheet_names = excel_obj.sheet_names
 
-    # 1. อ่านชีท MB51 เป็นแกนหลัก
+    # 1. อ่านชีท MB51 เป็นหลัก
     if "MB51" in sheet_names:
         df_mb51 = pd.read_excel(excel_obj, sheet_name="MB51")
     else:
@@ -92,7 +92,6 @@ def process_mb51_file(uploaded_file):
                     desc_dict[mat]["desc_th"] = th
 
     # 3. จัดการแผนก (คอลัมน์ X: 領料站 หรือ คอลัมน์ S: 收貨儲存地點)
-    # แก้ไขปัญหาชื่อคอลัมน์ชนกันด้วยการ Rename เป็น 儲存地點_data ก่อน Merge
     if (
         "Data" in sheet_names
         and "物料文件" in df_mb51.columns
@@ -117,7 +116,7 @@ def process_mb51_file(uploaded_file):
                     df_mb51["儲存地點_data"]
                 )
 
-    # 4. รหัสวัสดุ (Material Code) -> คอลัมน์ Y หรือ B
+    # 4. รหัสวัสดุ (Material Code)
     mat_col = next(
         (
             c
@@ -128,7 +127,7 @@ def process_mb51_file(uploaded_file):
     )
     df_mb51["Material_Code"] = df_mb51[mat_col].astype(str).str.strip()
 
-    # 5. จำนวนการเบิกแต่ละรอบ -> คอลัมน์ AA (Quantity)
+    # 5. จำนวนการเบิกแต่ละรอบ (คอลัมน์ AA: Quantity)
     qty_col = next(
         (
             c
@@ -145,7 +144,7 @@ def process_mb51_file(uploaded_file):
         .fillna(0)
     )
 
-    # 6. ยอดคงเหลือ Stock ปัจจุบัน -> คอลัมน์ AC (Stock) โดยจัดการแปลง #N/A เป็น 0
+    # 6. ยอดคงเหลือ Stock ปัจจุบัน (คอลัมน์ AC: Stock)
     stock_col = next(
         (c for c in df_mb51.columns if c in ["Stock", "庫存"]), None
     )
@@ -179,7 +178,7 @@ def process_mb51_file(uploaded_file):
         .str.upper()
     )
 
-    # 9. วันที่/เดือนที่เบิก -> คอลัมน์ L (過帳日期) หรือ U (領料月)
+    # 9. วันที่/เดือนที่เบิก (คอลัมน์ L: 過帳日期 หรือ คอลัมน์ U: 領料月)
     if "領料月" in df_mb51.columns and df_mb51["領料月"].dropna().count() > 0:
         df_mb51["Year_Month"] = df_mb51["領料月"].astype(str).str.strip()
     elif "過帳日期" in df_mb51.columns:
@@ -208,7 +207,7 @@ def process_mb51_file(uploaded_file):
         ~df_mb51["Material_Code"].isin(["nan", "", "None", "Total"])
     ]
 
-    # คำนวณช่วงเดือนทั้งหมด (ม.ค. 2026 - ปัจจุบัน)
+    # คำนวณช่วงเดือนทั้งหมด (เช่น 2026-01 ถึง 2026-09)
     all_months = sorted(
         [m for m in df_mb51["Year_Month"].unique() if m not in ["Unknown", "nan"]]
     )
@@ -221,7 +220,7 @@ def process_mb51_file(uploaded_file):
         Total_Requisition=("Requisition_Qty", "sum"),
     )
 
-    # คำนวณยอดเบิกเฉลี่ยต่อเดือน = ยอดเบิกรวม / จำนวนเดือน
+    # คำนวณยอดเบิกเฉลี่ยต่อเดือน = ยอดเบิกรวม / จำนวนเดือนทั้งหมด (9 เดือน)
     mat_summary["Monthly_Average"] = (
         mat_summary["Total_Requisition"] / num_months
     ).round(2)
@@ -243,7 +242,18 @@ def process_mb51_file(uploaded_file):
         lambda m: desc_dict.get(m, {}).get("desc_en", "-")
     )
 
-    # Pivot แยกยอดเบิกตามแต่ละแผนก
+    # 11. ทำ Pivot แยกตามแต่ละเดือน (Monthly Columns)
+    month_pivot = df_mb51.pivot_table(
+        index="Material_Code",
+        columns="Year_Month",
+        values="Requisition_Qty",
+        aggfunc="sum",
+        fill_value=0,
+    )
+    month_cols = [f"M_{c}" for c in month_pivot.columns]
+    month_pivot.columns = month_cols
+
+    # 12. ทำ Pivot แยกตามแต่ละแผนก (Department Columns)
     dept_pivot = df_mb51.pivot_table(
         index="Material_Code",
         columns="Department",
@@ -254,14 +264,15 @@ def process_mb51_file(uploaded_file):
     dept_cols = [f"Dept_{c}" for c in dept_pivot.columns]
     dept_pivot.columns = dept_cols
 
-    # รวมตารางผลลัพธ์
+    # รวมทุกตารางเข้าด้วยกัน
     final_df = (
-        mat_summary.join(dept_pivot)
+        mat_summary.join(month_pivot)
+        .join(dept_pivot)
         .reset_index()
         .sort_values(by="Total_Requisition", ascending=False)
     )
 
-    return final_df, df_mb51, all_months, dept_cols
+    return final_df, df_mb51, all_months, month_cols, dept_cols
 
 
 # -------------------------------------------------------------
@@ -273,7 +284,9 @@ uploaded_file = st.sidebar.file_uploader(
 )
 
 if uploaded_file is not None:
-    final_df, raw_df, all_months, dept_cols = process_mb51_file(uploaded_file)
+    final_df, raw_df, all_months, month_cols, dept_cols = process_mb51_file(
+        uploaded_file
+    )
 
     st.sidebar.markdown("---")
     st.sidebar.header("🔍 ค้นหาและกรองข้อมูล")
@@ -283,6 +296,8 @@ if uploaded_file is not None:
     ).strip()
 
     filtered_df = final_df.copy()
+    filtered_raw = raw_df.copy()
+
     if search_text:
         match_condition = (
             filtered_df["Material_Code"]
@@ -296,18 +311,22 @@ if uploaded_file is not None:
             .str.contains(search_text, case=False, na=False)
         )
         filtered_df = filtered_df[match_condition]
+        filtered_raw = filtered_raw[
+            filtered_raw["Material_Code"].isin(filtered_df["Material_Code"])
+        ]
 
     # -------------------------------------------------------------
     # 4. KPI Summary
     # -------------------------------------------------------------
+    total_requisition = filtered_df["Total_Requisition"].sum()
+    monthly_avg_total = total_requisition / len(all_months) if all_months else 0
+
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("จำนวนรายการวัสดุ", f"{len(filtered_df):,} รายการ")
-    m2.metric(
-        "ยอดเบิกรวมทั้งหมด", f"{filtered_df['Total_Requisition'].sum():,.2f}"
-    )
+    m2.metric("ยอดเบิกรวมทั้งหมด", f"{total_requisition:,.2f}")
     m3.metric(
-        f"เฉลี่ยต่อเดือน ({len(all_months)} เดือน)",
-        f"{filtered_df['Monthly_Average'].sum():,.2f}",
+        f"ยอดเบิกเฉลี่ยต่อเดือน ({len(all_months)} เดือน)",
+        f"{monthly_avg_total:,.2f}",
     )
     m4.metric(
         "สต็อกคงเหลือปัจจุบัน", f"{filtered_df['Current_Stock'].sum():,.2f}"
@@ -318,16 +337,27 @@ if uploaded_file is not None:
     # -------------------------------------------------------------
     # 5. Main Dashboard Tabs
     # -------------------------------------------------------------
-    tab1, tab2, tab3 = st.tabs(
+    tab1, tab2, tab3, tab4 = st.tabs(
         [
-            "📋 ตารางสรุปวัสดุและยอดแยกแผนก",
-            "📊 วิเคราะห์รายแผนกสำหรับแต่ละวัสดุ",
-            "📈 แนวโน้มการเบิกรายเดือน",
+            "📋 ตารางสรุปวัสดุ (รายเดือน & แผนก)",
+            "📅 สรุปยอดเบิกรายเดือน (Monthly Summary)",
+            "🏢 วิเคราะห์รายแผนก",
+            "📈 กราฟแนวโน้มการเบิกรายเดือน",
         ]
     )
 
+    # -------------------------------------------------------------
+    # TAB 1: Material Master Table
+    # -------------------------------------------------------------
     with tab1:
         st.subheader("📋 ตารางข้อมูลการเบิก ยอดเฉลี่ยต่อเดือน และยอดสต็อกคงเหลือ")
+
+        # สวิตช์เลือกแสดงคอลัมน์รายเดือน / แผนก
+        col_view1, col_view2 = st.columns(2)
+        with col_view1:
+            show_monthly_cols = st.checkbox("แสดงคอลัมน์ยอดเบิกแต่ละเดือน", value=True)
+        with col_view2:
+            show_dept_cols = st.checkbox("แสดงคอลัมน์ยอดเบิกแต่ละแผนก", value=True)
 
         base_cols = [
             "Material_Code",
@@ -339,9 +369,17 @@ if uploaded_file is not None:
             "Monthly_Average",
             "Stock_Coverage_Months",
         ]
-        display_table = filtered_df[base_cols + dept_cols].copy()
 
-        rename_headers = {
+        active_cols = base_cols.copy()
+        if show_monthly_cols:
+            active_cols += month_cols
+        if show_dept_cols:
+            active_cols += dept_cols
+
+        display_table = filtered_df[active_cols].copy()
+
+        # เปลี่ยนชื่อหัวตารางสำหรับแสดงบนหน้าเว็บ (ภาษาไทย)
+        rename_headers_display = {
             "Material_Code": "เลขวัสดุ",
             "Description_TH": "รายละเอียด (ไทย)",
             "Description_EN": "รายละเอียด (EN)",
@@ -351,38 +389,136 @@ if uploaded_file is not None:
             "Monthly_Average": "ยอดเบิกเฉลี่ย/เดือน",
             "Stock_Coverage_Months": "สต็อกพอใช้อีก (เดือน)",
         }
+        for m in month_cols:
+            rename_headers_display[m] = f"เดือน {m.replace('M_', '')}"
         for d in dept_cols:
-            rename_headers[d] = f"แผนก {d.replace('Dept_', '')}"
+            rename_headers_display[d] = f"แผนก {d.replace('Dept_', '')}"
 
-        display_table = display_table.rename(columns=rename_headers)
+        table_for_web = display_table.rename(columns=rename_headers_display)
+
+        # กำหนด Format ตัวเลข
+        fmt_dict = {
+            "Stock ปัจจุบัน": "{:,.2f}",
+            "ยอดเบิกรวมสะสม": "{:,.2f}",
+            "ยอดเบิกเฉลี่ย/เดือน": "{:,.2f}",
+            "สต็อกพอใช้อีก (เดือน)": "{:,.1f}",
+        }
+        if show_monthly_cols:
+            for m in month_cols:
+                fmt_dict[rename_headers_display[m]] = "{:,.2f}"
+        if show_dept_cols:
+            for d in dept_cols:
+                fmt_dict[rename_headers_display[d]] = "{:,.2f}"
 
         st.dataframe(
-            display_table.style.format(
-                {
-                    "Stock ปัจจุบัน": "{:,.2f}",
-                    "ยอดเบิกรวมสะสม": "{:,.2f}",
-                    "ยอดเบิกเฉลี่ย/เดือน": "{:,.2f}",
-                    "สต็อกพอใช้อีก (เดือน)": "{:,.1f}",
-                    **{rename_headers[d]: "{:,.2f}" for d in dept_cols},
-                }
-            ),
+            table_for_web.style.format(fmt_dict),
             use_container_width=True,
             height=450,
         )
 
+        # ---------------------------------------------------------
+        # ตารางสำหรับดาวน์โหลดเป็นภาษาอังกฤษทั้งหมด (English Only)
+        # ---------------------------------------------------------
+        export_base_cols = [
+            "Material_Code",
+            "Description_EN",
+            "Description_TH",
+            "Unit",
+            "Current_Stock",
+            "Total_Requisition",
+            "Monthly_Average",
+            "Stock_Coverage_Months",
+        ]
+        export_table = filtered_df[export_base_cols + month_cols + dept_cols].copy()
+
+        rename_headers_en = {
+            "Material_Code": "Material Number",
+            "Description_EN": "Material Description (EN)",
+            "Description_TH": "Material Description (TH)",
+            "Unit": "Base Unit",
+            "Current_Stock": "Current Stock",
+            "Total_Requisition": "Total Requisition",
+            "Monthly_Average": "Monthly Average Issue",
+            "Stock_Coverage_Months": "Stock Coverage (Months / MOS)",
+        }
+        for m in month_cols:
+            clean_m = m.replace("M_", "")
+            rename_headers_en[m] = f"Issue {clean_m}"
+        for d in dept_cols:
+            clean_dept = d.replace("Dept_", "")
+            rename_headers_en[d] = f"Dept {clean_dept}"
+
+        export_table = export_table.rename(columns=rename_headers_en)
+
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-            display_table.to_excel(
+            export_table.to_excel(
                 writer, sheet_name="Material_Summary", index=False
             )
+
         st.download_button(
-            label="📥 ดาวน์โหลดตารางสรุปนี้เป็น Excel (.xlsx)",
+            label="📥 Download Summary Report (Excel .xlsx)",
             data=buffer.getvalue(),
-            file_name="Material_Summary_2026.xlsx",
+            file_name="Material_Requisition_Summary_2026.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
+    # -------------------------------------------------------------
+    # TAB 2: Monthly Summary Table
+    # -------------------------------------------------------------
     with tab2:
+        st.subheader("📅 ตารางสรุปยอดเบิกรายเดือนและค่าเฉลี่ย (ตั้งแต่ 1/1/2026 ถึงปัจจุบัน)")
+
+        # คำนวณสรุปรายเดือน
+        monthly_stat = (
+            filtered_raw.groupby("Year_Month")
+            .agg(
+                Total_Requisition=("Requisition_Qty", "sum"),
+                Transaction_Count=("Requisition_Qty", "count"),
+                Unique_Materials=("Material_Code", "nunique"),
+            )
+            .reset_index()
+        )
+        monthly_stat["Avg_Per_Transaction"] = (
+            monthly_stat["Total_Requisition"] / monthly_stat["Transaction_Count"]
+        )
+        monthly_stat["Avg_Per_Material"] = (
+            monthly_stat["Total_Requisition"] / monthly_stat["Unique_Materials"]
+        )
+
+        display_monthly = monthly_stat.rename(
+            columns={
+                "Year_Month": "ประจำเดือน (Period)",
+                "Total_Requisition": "ยอดเบิกรวม (Total Issue)",
+                "Transaction_Count": "จำนวนครั้งที่เบิก (Transactions)",
+                "Unique_Materials": "จำนวนชนิดวัสดุ (Active Items)",
+                "Avg_Per_Transaction": "ค่าเฉลี่ยต่อการเบิก 1 ครั้ง",
+                "Avg_Per_Material": "ค่าเฉลี่ยต่อชนิดวัสดุ",
+            }
+        )
+
+        st.dataframe(
+            display_monthly.style.format(
+                {
+                    "ยอดเบิกรวม (Total Issue)": "{:,.2f}",
+                    "จำนวนครั้งที่เบิก (Transactions)": "{:,} ครั้ง",
+                    "จำนวนชนิดวัสดุ (Active Items)": "{:,} รหัส",
+                    "ค่าเฉลี่ยต่อการเบิก 1 ครั้ง": "{:,.2f}",
+                    "ค่าเฉลี่ยต่อชนิดวัสดุ": "{:,.2f}",
+                }
+            ),
+            use_container_width=True,
+        )
+
+        st.info(
+            f"💡 **สรุปภาพรวม:** ตั้งแต่วันที่ 1/1/2026 จนถึงปัจจุบัน (รวม {len(all_months)} เดือน) "
+            f"มียอดการเบิกรวมทั้งสิ้น **{total_requisition:,.2f}** หรือคิดเป็น **ยอดเบิกเฉลี่ย {monthly_avg_total:,.2f} ต่อเดือน**"
+        )
+
+    # -------------------------------------------------------------
+    # TAB 3: Department Breakdown
+    # -------------------------------------------------------------
+    with tab3:
         st.subheader("🏢 ยอดการเบิกแยกตามแต่ละแผนกสำหรับวัสดุที่เลือก")
         selected_material = st.selectbox(
             "เลือกเลขวัสดุที่ต้องการดูรายละเอียดแผนก:",
@@ -390,7 +526,7 @@ if uploaded_file is not None:
         )
 
         if selected_material:
-            mat_data = raw_df[raw_df["Material_Code"] == selected_material]
+            mat_data = filtered_raw[filtered_raw["Material_Code"] == selected_material]
             dept_chart_data = (
                 mat_data.groupby("Department")["Requisition_Qty"]
                 .sum()
@@ -423,10 +559,13 @@ if uploaded_file is not None:
                 )
                 st.plotly_chart(fig_pie, use_container_width=True)
 
-    with tab3:
+    # -------------------------------------------------------------
+    # TAB 4: Trend Over Time
+    # -------------------------------------------------------------
+    with tab4:
         st.subheader("📅 แนวโน้มการเบิกจ่ายในแต่ละเดือน (Jan 2026 - ปัจจุบัน)")
         monthly_trend = (
-            raw_df.groupby(["Year_Month", "Department"])["Requisition_Qty"]
+            filtered_raw.groupby(["Year_Month", "Department"])["Requisition_Qty"]
             .sum()
             .reset_index()
         )
